@@ -97,90 +97,120 @@
                 if (answer) {
                     document.title = answer;
                     console.log('✅ Найден ответ:', answer);
+                    return true;
                 } else {
                     document.title = ' ';
+                    return false;
                 }
             }
 
             // ============================================================
-            //  РЕГИСТРАЦИЯ SERVICE WORKER
+            //  ПОКАЗ УВЕДОМЛЕНИЙ (работает даже в фоне)
             // ============================================================
-            
-            if ('serviceWorker' in navigator) {
-                navigator.serviceWorker.register('sw.js')
-                    .then(function(registration) {
-                        console.log('✅ Service Worker зарегистрирован');
-                        
-                        // Отправляем базу данных в Service Worker
-                        const dbData = Array.from(questionDB.entries());
-                        registration.active?.postMessage({
-                            type: 'UPDATE_DB',
-                            data: dbData
-                        });
-                    })
-                    .catch(function(error) {
-                        console.log('❌ Ошибка регистрации Service Worker:', error);
-                    });
+            function showNotification(question, answer) {
+                if (!('Notification' in window)) {
+                    console.warn('⚠️ Уведомления не поддерживаются');
+                    return;
+                }
 
-                // Слушаем сообщения от Service Worker
-                navigator.serviceWorker.addEventListener('message', function(event) {
-                    const data = event.data;
-                    
-                    if (data.type === 'UPDATE_TITLE') {
-                        console.log('📨 Получено сообщение от SW:', data.answer);
-                        updateTitle(data.answer);
-                    }
-                });
+                if (Notification.permission === 'granted') {
+                    new Notification('📋 Ответ найден!', {
+                        body: `Вопрос: "${question}"\nОтвет: ${answer}`,
+                        icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">✅</text></svg>'
+                    });
+                } else if (Notification.permission === 'default') {
+                    Notification.requestPermission();
+                }
             }
 
             // ============================================================
-            //  ОСНОВНАЯ ЛОГИКА (работает когда страница в фокусе)
+            //  ОСНОВНАЯ ЛОГИКА
             // ============================================================
             
             let hasPermission = false;
+            let lastCheckedText = '';
+            let lastAnswer = '';
 
             async function readClipboard() {
                 try {
                     if (!navigator.clipboard || !navigator.clipboard.readText) return;
                     
                     const text = await navigator.clipboard.readText();
+                    
+                    // Если текст не изменился - пропускаем
+                    if (text === lastCheckedText) return;
+                    lastCheckedText = text;
+                    
                     if (text && text.trim()) {
-                        console.log('📝 Текст из буфера (страница):', text);
+                        console.log('📝 Текст из буфера:', text);
                         const answer = findAnswer(text);
-                        updateTitle(answer);
+                        
+                        if (answer) {
+                            // Обновляем заголовок
+                            updateTitle(answer);
+                            
+                            // Если страница НЕ в фокусе, показываем уведомление
+                            if (!document.hasFocus()) {
+                                console.log('🔔 Страница не в фокусе, показываем уведомление');
+                                showNotification(text, answer);
+                            }
+                            
+                            lastAnswer = answer;
+                        } else {
+                            updateTitle(null);
+                        }
                     }
-                } catch (e) {
-                    // Если нет разрешения - игнорируем
+                } catch (error) {
+                    if (error.name === 'NotAllowedError') {
+                        console.warn('⛔ Нет разрешения. Кликните по странице.');
+                    }
                 }
             }
 
             // Запрашиваем разрешение при клике
-            document.addEventListener('click', async () => {
-                if (!hasPermission) {
-                    try {
-                        if (navigator.clipboard && navigator.clipboard.readText) {
-                            await navigator.clipboard.readText();
-                            hasPermission = true;
-                            console.log('✅ Разрешение получено на странице');
-                            
-                            // Отправляем разрешение в Service Worker
-                            const registration = await navigator.serviceWorker.ready;
-                            registration.active?.postMessage({
-                                type: 'PERMISSION_GRANTED'
-                            });
-                        }
-                    } catch (e) {
-                        console.log('⛔ Пользователь отказал в разрешении');
+            async function requestPermission() {
+                if (hasPermission) return;
+                
+                try {
+                    if (!navigator.clipboard || !navigator.clipboard.readText) return;
+                    
+                    await navigator.clipboard.readText();
+                    hasPermission = true;
+                    console.log('✅ Разрешение получено!');
+                    
+                    // Запрашиваем разрешение на уведомления
+                    if ('Notification' in window && Notification.permission === 'default') {
+                        Notification.requestPermission();
                     }
+                    
+                    await readClipboard();
+                } catch (error) {
+                    console.warn('⛔ Разрешение не получено. Кликните ещё раз.');
                 }
+            }
+
+            // Обработчик клика
+            document.addEventListener('click', () => {
+                requestPermission();
             });
 
-            // Проверяем буфер каждые 500ms (если есть разрешение)
+            // ============================================================
+            //  ФОНОВЫЙ ОПРОС (РАБОТАЕТ ДАЖЕ КОГДА СТРАНИЦА НЕ В ФОКУСЕ)
+            // ============================================================
+            
+            // Проверяем каждую секунду
             setInterval(() => {
                 if (hasPermission) {
                     readClipboard();
                 }
-            }, 500);
+            }, 1000);
+
+            // При возвращении фокуса на страницу
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible' && hasPermission) {
+                    readClipboard();
+                }
+            });
 
             // ============================================================
             //  ОТЛАДКА
@@ -189,7 +219,8 @@
             console.log('🚀 Страница загружена!');
             console.log('📋 База содержит', questionDB.size, 'вопросов');
             console.log('💡 Кликните по странице для получения разрешения');
-            console.log('📌 Ответ будет появляться в заголовке даже в фоне!');
+            console.log('📌 Если страница в фокусе — ответ в заголовке');
+            console.log('🔔 Если страница НЕ в фокусе — придёт уведомление!');
 
         })();
     </script>
